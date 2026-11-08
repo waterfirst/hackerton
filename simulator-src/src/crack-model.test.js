@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildCrackScenario,crackSample,crackFrame,crackGeometry,crackReferenceSample} from './crack-model.js';
+import {buildCrackScenario,crackSample,crackFrame,crackGeometry,crackReferenceSample,crossedPolarizerTransmission} from './crack-model.js';
 const close=(a,b,tol=1e-8)=>assert.ok(Math.abs(a-b)<tol,`${a} != ${b}`);
 const layouts=[[1,'row'],[2,'row'],[3,'row'],[4,'row'],[4,'grid']];
 function segmentDistance(a,b,h){const dx=b.x-a.x,dy=b.y-a.y,l=dx*dx+dy*dy,t=l?Math.max(0,Math.min(1,((h.x-a.x)*dx+(h.y-a.y)*dy)/l)):0;return Math.hypot(a.x+t*dx-h.x,a.y+t*dy-h.y);}
@@ -148,5 +148,131 @@ test('Q is a deterministic near-P normal offset, showing default shoulder above 
   const v=buildCrackScenario(params),at=crackFrame(v,10).shoulderProbe;
   assert.ok(v.shoulderProbe);assert.equal(at.excluded,false);assert.ok(Number.isFinite(at.retardanceNm));
   if(params.bandStrength===0)close(at.referenceRetardanceNm,at.baseRetardanceNm);else close(at.retardanceNm,0);
+ }
+});
+test('ideal crossed optics preserve bright half-wave orders, extinction and periodicity',()=>{
+ const wavelength=550,theta=Math.PI/4;
+ close(crossedPolarizerTransmission(wavelength/2,wavelength,theta),1);
+ close(crossedPolarizerTransmission(wavelength,wavelength,theta),0);
+ close(crossedPolarizerTransmission(0,wavelength,theta),0);
+ close(crossedPolarizerTransmission(wavelength/2,wavelength,0),0);
+ close(crossedPolarizerTransmission(wavelength/2,wavelength,theta,45),0);
+ close(crossedPolarizerTransmission(3*wavelength/2,wavelength,theta),1);
+ for(const retardance of [0,1,50,137,275,550,825,1450])for(const angle of [0,.17,theta,1.3]){
+  const value=crossedPolarizerTransmission(retardance,wavelength,angle);
+  assert.ok(value>=0&&value<=1);
+  close(value,crossedPolarizerTransmission(retardance+3*wavelength,wavelength,angle));
+  close(value,crossedPolarizerTransmission(retardance,wavelength,angle+Math.PI/2));
+ }
+ for(const args of [[-1,550,0],[10,0,0],[10,550,NaN],[10,550,0,Infinity]])assert.throws(()=>crossedPolarizerTransmission(...args),RangeError);
+});
+test('each prescribed path seeds at its largest intact principal-stress difference',()=>{
+ for(const [holeCount,layout] of layouts.slice(1)){
+  const s=buildCrackScenario({holeCount,layout,thresholdNm:20});
+  for(const profile of s.growthProfiles){
+   const path=s.candidatePaths[profile.edgeIndex],seed=s.seeds[profile.edgeIndex],values=profile.preReleasePrincipalDifferenceMPa;
+   assert.equal(seed.pathPointIndex,profile.seedPointIndex);
+   close(values[profile.seedPointIndex],Math.max(...values));
+   close(seed.principalDifferenceMPa,Math.max(...values));
+   close(seed.x,path.points[profile.seedPointIndex].x);close(seed.y,path.points[profile.seedPointIndex].y);
+   for(let i=0;i<path.points.length;i++){const q=path.points[i];close(values[i],crackReferenceSample(s,q.x,q.y,s.onsetTime).principalDifferenceMPa);}
+  }
+  assert.equal(s.propagationModel.assumed,true);
+ }
+ // The actual maximum can be on a rim. Do not invent an interior seed to make
+ // both fronts move; the grid also exercises true interior two-front seeds.
+ const single=buildCrackScenario();assert.ok([0,single.candidatePaths[0].points.length-1].includes(single.seeds[0].pathPointIndex));
+ const grid=buildCrackScenario({holeCount:4,layout:'grid'});
+ assert.ok(grid.growthProfiles.some((p,i)=>p.seedPointIndex>0&&p.seedPointIndex<grid.candidatePaths[i].points.length-1));
+});
+test('normalized local segment speed rises with intact stress and integrates to requested duration',()=>{
+ const s=buildCrackScenario({holeCount:4,layout:'grid',propagationDurationSec:3});
+ for(const p of s.growthProfiles){
+  const peak=Math.max(...p.preReleasePrincipalDifferenceMPa),segmentStress=p.segmentSpeedWeights.map((_,i)=>(p.preReleasePrincipalDifferenceMPa[i]+p.preReleasePrincipalDifferenceMPa[i+1])/2);
+  for(let i=0;i<p.segmentSpeedWeights.length;i++){
+   close(p.segmentSpeedWeights[i],.25+.75*segmentStress[i]/peak);
+   assert.ok(p.segmentSpeedWeights[i]>=.25&&p.segmentSpeedWeights[i]<=1);
+   const ds=p.arcLengthsUm[i+1]-p.arcLengthsUm[i];close(Math.abs(p.arrivalDelaysSec[i+1]-p.arrivalDelaysSec[i]),ds/p.segmentSpeedUmPerSec[i]);
+  }
+  const low=segmentStress.indexOf(Math.min(...segmentStress)),high=segmentStress.indexOf(Math.max(...segmentStress));
+  assert.ok(p.segmentSpeedUmPerSec[high]>p.segmentSpeedUmPerSec[low]);
+  close(Math.max(...p.arrivalDelaysSec),3);close(p.arrivalDelaysSec[p.seedPointIndex],0);
+ }
+ const fast=buildCrackScenario({propagationDurationSec:.2}),slow=buildCrackScenario({propagationDurationSec:5});
+ assert.deepEqual(fast.candidatePaths,slow.candidatePaths);close(fast.onsetTime,slow.onsetTime);
+ for(let i=0;i<fast.growthProfiles[0].segmentSpeedUmPerSec.length;i++)close(fast.growthProfiles[0].segmentSpeedUmPerSec[i]/slow.growthProfiles[0].segmentSpeedUmPerSec[i],25);
+ for(const duration of [0,.199,5.001,NaN,Infinity])assert.throws(()=>buildCrackScenario({propagationDurationSec:duration}),RangeError);
+});
+test('growth is monotone and connected around each seed, with finite nonsingular front markers',()=>{
+ for(const [holeCount,layout] of layouts.slice(1)){
+  const s=buildCrackScenario({holeCount,layout,thresholdNm:20});let previous=null;
+  assert.equal(crackFrame(s,s.onsetTime-.0001).paths.length,0);
+  for(let step=0;step<=20;step++){
+   const frame=crackFrame(s,s.onsetTime+s.params.propagationDurationSec*step/20);
+   assert.equal(frame.paths.length,s.edges.length);assert.equal(frame.fronts.length,2*s.edges.length);
+   assert.deepEqual(frame.tips,[]);assert.equal(frame.nearTipMaxStressMPa,null);
+   assert.ok(frame.growthFactor>=0&&frame.growthFactor<=1);
+   if(previous)assert.ok(frame.growthFactor>=previous.growthFactor);
+   for(const [i,path] of frame.paths.entries()){
+    assert.ok(path.points.length>=2);assert.ok(path.startDistanceUm<=path.seedDistanceUm+1e-8&&path.endDistanceUm>=path.seedDistanceUm-1e-8);
+    close(path.grownLengthUm,path.endDistanceUm-path.startDistanceUm);
+    close(path.progress,path.grownLengthUm/path.totalLengthUm);
+    const drawnLength=path.points.slice(1).reduce((length,q,j)=>length+Math.hypot(q.x-path.points[j].x,q.y-path.points[j].y),0);close(drawnLength,path.grownLengthUm);
+    if(previous){assert.ok(path.startDistanceUm<=previous.paths[i].startDistanceUm+1e-8);assert.ok(path.endDistanceUm>=previous.paths[i].endDistanceUm-1e-8);}
+    for(const front of path.fronts){assert.ok(Number.isFinite(front.x)&&Number.isFinite(front.y));assert.equal(front.active,!front.atRim);}
+   }
+   if(step===0){close(frame.growthFactor,0);assert.equal(frame.status,'propagating');}
+   else if(step<20){assert.ok(frame.growthFactor>0&&frame.growthFactor<1);assert.equal(frame.status,'propagating');}
+   else{close(frame.growthFactor,1);assert.equal(frame.status,'connected');assert.equal(frame.connected,true);assert.equal(frame.completedPathCount,s.edges.length);assert.ok(frame.fronts.every(f=>f.atRim));for(let i=0;i<frame.paths.length;i++)assert.deepEqual(frame.paths[i].points,s.candidatePaths[i].points);}
+   previous=frame;
+  }
+ }
+});
+test('every partial growth segment avoids hole interiors and stays inside the domain',()=>{
+ for(const [holeCount,layout] of [[2,'row'],[4,'grid']])for(const gapUm of [.01,120,500]){
+  const s=buildCrackScenario({holeCount,layout,gapUm,thresholdNm:1});
+  for(const fraction of [0,.01,.1,.35,.75,1])for(const path of crackFrame(s,s.onsetTime+s.params.propagationDurationSec*fraction).paths){
+   for(let i=1;i<path.points.length;i++)for(const h of s.holes)assert.ok(segmentDistance(path.points[i-1],path.points[i],h)>=s.radiusUm*(1-1e-9));
+   for(const q of path.points)assert.ok(q.x>=s.domain.xMin&&q.x<=s.domain.xMax&&q.y>=s.domain.yMin&&q.y<=s.domain.yMax);
+  }
+ }
+});
+test('release starts at each local front arrival and never relaxes a future path section',()=>{
+ const s=buildCrackScenario(),path=s.candidatePaths[0],profile=s.growthProfiles[0];
+ for(let i=0;i<path.points.length;i+=7){
+  const q=path.points[i],arrival=s.onsetTime+profile.arrivalDelaysSec[i],before=crackSample(s,q.x,q.y,Math.max(0,arrival-.001));
+  close(before.relaxation,0);assert.equal(before.localGrowthReached,false);close(before.retardanceNm,before.referenceRetardanceNm);
+  const at=crackSample(s,q.x,q.y,arrival);close(at.localArrivalTimeSec,arrival);close(at.relaxation,0);
+  const after=crackSample(s,q.x,q.y,arrival+.2);close(after.relaxation,s.params.relaxationFraction*(-Math.expm1(-.2/s.params.relaxationTauSec)));assert.equal(after.localGrowthReached,true);
+  close(after.retardanceNm,after.referenceRetardanceNm*(1-after.relaxation));
+ }
+ const i=43,a=path.points[i],b=path.points[i+1],fraction=.37,q={x:a.x+(b.x-a.x)*fraction,y:a.y+(b.y-a.y)*fraction};
+ const arrival=s.onsetTime+profile.arrivalDelaysSec[i]+fraction*(profile.arrivalDelaysSec[i+1]-profile.arrivalDelaysSec[i]);
+ close(crackSample(s,q.x,q.y,10).localArrivalTimeSec,arrival);
+ // Warm cache at the end, then seek backward: no time-dependent release may
+ // leak into pre-arrival samples or either same-load reference view.
+ const early=crackSample(s,q.x,q.y,s.onsetTime+.01);close(early.relaxation,0);
+ const fresh=buildCrackScenario();assert.deepEqual(early,crackSample(fresh,q.x,q.y,s.onsetTime+.01));
+ for(const view of ['reference','base']){
+  const start=crackSample(s,q.x,q.y,s.onsetTime,{view}),late=crackSample(s,q.x,q.y,10,{view});
+  close(start.retardanceNm,late.retardanceNm);close(start.principalDifferenceMPa,late.principalDifferenceMPa);close(late.relaxation,0);
+ }
+});
+test('propagation preserves zero-load, zero-optical and single-hole edge cases',()=>{
+ for(const params of [{loadMPa:0,laserEnergyMj:0},{coefficient:0},{holeCount:1,laserEnergyMj:1000}]){
+  const s=buildCrackScenario(params),f=crackFrame(s,10);close(f.growthFactor,0);assert.equal(f.connected,false);assert.deepEqual(f.paths,[]);assert.deepEqual(f.fronts,[]);close(f.probe.relaxation,0);assert.equal(f.probe.localArrivalTimeSec,null);
+ }
+ // Zero laser energy alone still permits explicitly configured background
+ // load to meet the threshold; it must not silently erase background stress.
+ const s=buildCrackScenario({laserEnergyMj:0,loadMPa:60});assert.equal(crackFrame(s,10).connected,true);
+ for(const duration of [.2,5]){const v=buildCrackScenario({propagationDurationSec:duration,thresholdNm:400});if(Number.isFinite(v.onsetTime)){const f=crackFrame(v,v.onsetTime+duration);assert.equal(f.connected,true);close(f.growthFactor,1);}}
+});
+test('exact duration snaps every row/grid connector to completed rims despite rounding',()=>{
+ for(const [holeCount,layout] of layouts.slice(1))for(const propagationDurationSec of [.2,1,2,5]){
+  const s=buildCrackScenario({holeCount,layout,propagationDurationSec,thresholdNm:20}),frame=crackFrame(s,s.onsetTime+propagationDurationSec);
+  assert.equal(frame.growthFactor,1);assert.equal(frame.completedPathCount,s.edges.length);assert.equal(frame.connected,true);assert.equal(frame.status,'connected');
+  assert.ok(frame.fronts.every(front=>front.atRim&&!front.active));
+  for(let i=0;i<frame.paths.length;i++)assert.deepEqual(frame.paths[i].points,s.candidatePaths[i].points);
+  assert.deepEqual(crackFrame(s,-10),crackFrame(s,0));assert.deepEqual(crackFrame(s,20),crackFrame(s,10));assert.throws(()=>crackFrame(s,NaN),RangeError);
  }
 });

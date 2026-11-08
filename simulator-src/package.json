@@ -1,12 +1,12 @@
 {
   "name": "tgv-evidence-simulator",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "test": "node ../sim/models.test.cjs && node --test src/twin-model.test.js src/twin-scene.test.js src/crack-model.test.js"
+    "test": "node ../sim/models.test.cjs && node --test src/twin-model.test.js src/twin-scene.test.js src/crack-model.test.js src/crack-display.test.js"
   },
   "dependencies": {
     "react": "19.2.0",
