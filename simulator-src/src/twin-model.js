@@ -29,18 +29,30 @@ export function processState(progress01) {
 }
 /** All geometry is in µm, volume in µm³. A cylindrical bottom-up fill has
  * height = thicknessUm * fillFraction and volume = holeVolumeUm3 * fillFraction.
+ * holeVolumeUm3 is per hole; totalHoleVolumeUm3 sums all cylindrical holes.
+ * gapUm is the positive edge-to-edge ligament; pitchUm = diameterUm + gapUm.
  * depthUm is the prescribed thickness of each surface strengthening layer.
  */
-export function sceneGeometry({thicknessUm, diameterUm, depthUm}) {
+export function sceneGeometry({thicknessUm, diameterUm, depthUm, gapUm = 120, holeCount = 2, layout = 'row'}) {
   positive(thicknessUm, 'thicknessUm');
   positive(diameterUm, 'diameterUm');
   nonnegative(depthUm, 'depthUm');
   if (depthUm >= thicknessUm / 2) throw new RangeError('depthUm must be < thicknessUm/2');
-  const plateWidthUm = finite(Math.max(6 * diameterUm, 1.4 * thicknessUm), 'plateWidthUm');
+  positive(gapUm, 'gapUm');
+  const pitchUm = positive(diameterUm + gapUm, 'pitchUm');
+  if (!Number.isInteger(holeCount) || holeCount < 1 || holeCount > 4) throw new RangeError('holeCount must be an integer from 1 to 4');
+  if (layout !== 'row' && layout !== 'grid') throw new RangeError('layout must be row or grid');
+  if (layout === 'grid' && holeCount !== 4) throw new RangeError('grid layout requires 4 holes');
+  const centersUm = layout === 'grid'
+    ? [-pitchUm/2,pitchUm/2].flatMap(y=>[-pitchUm/2,pitchUm/2].map(x=>({x,y})))
+    : Array.from({length:holeCount},(_,i)=>({x:(i-(holeCount-1)/2)*pitchUm,y:0}));
+  const spanUm = layout === 'grid' ? pitchUm : (holeCount-1)*pitchUm;
+  const plateWidthUm = finite(Math.max(6 * diameterUm, 1.4 * thicknessUm, spanUm + 3 * diameterUm), 'plateWidthUm');
   const radiusUm = positive(diameterUm / 2, 'radiusUm');
   const halfThicknessUm = positive(thicknessUm / 2, 'halfThicknessUm');
   const holeVolumeUm3 = positive(Math.PI * radiusUm ** 2 * thicknessUm, 'holeVolumeUm3');
-  return {thicknessUm, diameterUm, depthUm, plateWidthUm, halfThicknessUm,
+  const totalHoleVolumeUm3 = positive(holeCount * holeVolumeUm3, 'totalHoleVolumeUm3');
+  return {thicknessUm, diameterUm, depthUm, gapUm, pitchUm, centersUm, holeCount, layout, totalHoleVolumeUm3, plateWidthUm, halfThicknessUm,
     halfThickness: halfThicknessUm, radiusUm, halfWidthUm: plateWidthUm / 2, holeVolumeUm3};
 }
 /** Infinite, traction-free circular-hole analytic reference only. This is not

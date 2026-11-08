@@ -150,3 +150,93 @@ test('Storyboard camera exact keys, bounded continuous motion, and finite endpoi
     assert.ok(pose.targetZOverHeight>=-.25 && pose.targetZOverHeight<=.2);
   }
 });
+
+for(const half of [false,true]) test(`Two-hole ${half?'section':'full'} plate has both real voids, intact ligament and matching Cu volume`,()=>{
+  for(const gapUm of [1,120,1000]) {
+    const layout=twinLayout({...physical,gapUm,progress:1});
+    const {radius,centers,unit}=layout;
+    assert.equal(centers.length,2);
+    close((centers[1].x-centers[0].x-2*radius)/unit,gapUm);
+    geometry(plateShape(3,radius,half,true,centers),g=>geometry(diskShape(radius,half),plug=>{
+      close(signedVolume(g)+2*signedVolume(plug),36*(half?.5:1),2e-6);
+      const material=new THREE.MeshBasicMaterial({side:THREE.DoubleSide});
+      const mesh=new THREE.Mesh(g,material);mesh.updateMatrixWorld();
+      const shoot=(x,y)=>new THREE.Raycaster(new THREE.Vector3(x,y,2),new THREE.Vector3(0,0,-1)).intersectObject(mesh);
+      for(const {x} of centers) assert.equal(shoot(x,radius*.2).length,0,'hole center is empty');
+      assert.ok(shoot(0,radius*.2).length>0,'ligament remains solid');
+      if(half) assert.equal(shoot(0,-radius*.2).length,0);
+      for(const {x,y} of centers) {
+        const copper=new THREE.Mesh(plug,material);copper.position.set(x,y,0);copper.updateMatrixWorld();
+        assert.ok(new THREE.Raycaster(new THREE.Vector3(x,radius*.2,2),new THREE.Vector3(0,0,-1)).intersectObject(copper).length>0);
+      }
+      material.dispose();
+    }));
+  }
+});
+
+test('Two-hole cylindrical interfaces are removed at both centers, not at the origin',async()=>{
+  const {cylinderSurfaceSubset}=await import('./twin-scene.js');
+  const {radius,centers}=twinLayout({...physical,progress:0});
+  for(const half of [false,true]) geometry(plateShape(3,radius,half,true,centers),g=>{
+    const shell=cylinderSurfaceSubset(g,radius,false,centers),walls=cylinderSurfaceSubset(g,radius,true,centers);
+    try {
+      assert.ok(walls.index.count>0);
+      assert.equal(shell.index.count+walls.index.count,g.attributes.position.count);
+      const material=new THREE.MeshBasicMaterial({side:THREE.DoubleSide});
+      const mesh=new THREE.Mesh(walls,material);mesh.updateMatrixWorld();
+      for(const {x} of centers) assert.ok(new THREE.Raycaster(new THREE.Vector3(x,0,.5),new THREE.Vector3(0,1,0)).intersectObject(mesh).length>0);
+      material.dispose();
+    } finally {shell.dispose();walls.dispose();}
+  });
+});
+
+test('Spacing changes process centers but leaves single-hole optical and flat stress layout unchanged',()=>{
+  for(const mode of ['optical','stress']) {
+    const a=twinLayout({...physical,mode,gapUm:1}),b=twinLayout({...physical,mode,gapUm:1000});
+    assert.deepEqual(a,b);
+    assert.equal(a.centers.length,mode==='optical'?1:0);
+  }
+});
+
+for(const holeCount of [1,2,3,4]) for(const layout of holeCount===4?['row','grid']:['row']) for(const cutaway of [false,true]) {
+  test(`${holeCount} holes ${layout} ${cutaway?'half-section':'full'}: real voids and all retained copper match glass`,()=>{
+    for(const gapUm of [1,120,1000]) {
+      const state=twinLayout({...physical,holeCount,layout,cutaway,gapUm,progress:1});
+      const {radius,centers,visibleVias}=state;
+      assert.equal(centers.length,holeCount);
+      assert.equal(visibleVias.length,cutaway&&layout==='grid'?2:holeCount);
+      const shape=plateShape(3,radius,cutaway,true,centers);
+      assert.equal(shape.holes.length,cutaway?(layout==='grid'?2:0):holeCount);
+      geometry(shape,g=>{
+        const material=new THREE.MeshBasicMaterial({side:THREE.DoubleSide});
+        const plate=new THREE.Mesh(g,material);plate.updateMatrixWorld();
+        const shoot=(mesh,x,y)=>new THREE.Raycaster(new THREE.Vector3(x,y,2),new THREE.Vector3(0,0,-1)).intersectObject(mesh);
+        let fillVolume=0;
+        for(const via of visibleVias) geometry(diskShape(radius,via.half),cu=>{
+          assert.equal(via.half,cutaway&&layout==='row');
+          const y=via.y+radius*.2;
+          assert.equal(shoot(plate,via.x,y).length,0,'each retained hole is truly empty');
+          const copper=new THREE.Mesh(cu,material);copper.position.set(via.x,via.y,0);copper.updateMatrixWorld();
+          assert.ok(shoot(copper,via.x,y).length>0,'each retained hole has solid copper');
+          fillVolume+=signedVolume(cu);
+        });
+        close(signedVolume(g)+fillVolume,36*(cutaway?.5:1),3e-6);
+        if(cutaway) {
+          assert.equal(shoot(plate,0,-2).length,0,'removed half has no glass');
+          assert.ok(visibleVias.every(v=>v.y>=0),'removed half has no copper');
+        }
+        if(layout==='grid') assert.ok(shoot(plate,0,.01).length>0,'grid center ligament is solid');
+        material.dispose();
+      });
+    }
+  });
+}
+
+test('Hole count and layout do not alter legacy optical or stress geometry',()=>{
+  for(const mode of ['optical','stress']) {
+    const baseline=twinLayout({...physical,mode});
+    for(const holeCount of [1,2,3,4]) for(const layout of holeCount===4?['row','grid']:['row']) {
+      assert.deepEqual(twinLayout({...physical,mode,holeCount,layout}),baseline);
+    }
+  }
+});

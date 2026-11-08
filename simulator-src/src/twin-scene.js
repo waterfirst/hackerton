@@ -3,7 +3,7 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {processState, sceneGeometry, opticalSample} from './twin-model.js';
 
 const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
-const defaults = {mode:'process', progress:0, thicknessUm:500, diameterUm:100,
+const defaults = {mode:'process', progress:0, thicknessUm:500, diameterUm:100, gapUm:120, holeCount:2, layout:'row',
   depthUm:30, compressionMPa:400, loadMPa:20, coefficient:3.5, wavelengthNm:550,
   polarizerAngleDeg:0, cutaway:false, rotate:false, motion:true, visible:true,
   probeAngleDeg:90, probeRadiusOverA:1.5, reducedMotion:false, storyCamera:false};
@@ -29,18 +29,20 @@ export function storyboardCameraPose(progress) {
 }
 
 // XY is the plate plane; +Z is its top. Every dimension uses one common scale.
-export function plateShape(half, radius, cutaway, hole = true) {
+export function plateShape(half, radius, cutaway, hole = true, centers = [{x:0,y:0}]) {
   const s = new THREE.Shape();
   if (cutaway) {
     s.moveTo(-half, 0);
-    if (hole) {
-      s.lineTo(-radius, 0);
-      s.absarc(0, 0, radius, Math.PI, 0, true);
+    if (hole) for (const {x} of centers.filter(c=>c.y===0).sort((a,b)=>a.x-b.x)) {
+      s.lineTo(x-radius, 0);
+      s.absarc(x, 0, radius, Math.PI, 0, true);
     }
     s.lineTo(half, 0); s.lineTo(half, half); s.lineTo(-half, half); s.closePath();
   } else {
     s.moveTo(-half,-half); s.lineTo(half,-half); s.lineTo(half,half); s.lineTo(-half,half); s.closePath();
-    if (hole) { const p = new THREE.Path(); p.absarc(0,0,radius,0,Math.PI*2,true); s.holes.push(p); }
+  }
+  if (hole) for (const {x,y} of centers.filter(c=>!cutaway || c.y>radius)) {
+    const p = new THREE.Path(); p.absarc(x,y,radius,0,Math.PI*2,true); s.holes.push(p);
   }
   return s;
 }
@@ -55,11 +57,11 @@ export function extrusion(shape) {
 }
 // Remove only cylindrical interfaces between still-connected glass volumes.
 // The exposed drilled wall is rendered separately at its actual depth.
-export function cylinderSurfaceSubset(source, radius, curved) {
+export function cylinderSurfaceSubset(source, radius, curved, centers = [{x:0,y:0}]) {
   const g=source.clone(), p=g.attributes.position, n=g.attributes.normal, indices=[];
   for(let i=0;i<p.count;i+=3) {
     const wall=[0,1,2].every(j=>Math.abs(n.getZ(i+j))<1e-6 &&
-      Math.abs(Math.hypot(p.getX(i+j),p.getY(i+j))-radius)<1e-5);
+      centers.some(({x,y})=>Math.abs(Math.hypot(p.getX(i+j)-x,p.getY(i+j)-y)-radius)<1e-5));
     if(wall===curved) indices.push(i,i+1,i+2);
   }
   g.clearGroups();g.setIndex(indices);return g;
@@ -67,13 +69,15 @@ export function cylinderSurfaceSubset(source, radius, curved) {
 // Pure transform data used by the renderer and geometry regression tests.
 export function twinLayout(input) {
   const s={...defaults,...input}, dimensions=sceneGeometry(s);
-  const width=s.mode==='optical'?4*s.diameterUm:dimensions.plateWidthUm;
+  const width=s.mode==='optical'?4*s.diameterUm:s.mode==='stress'?Math.max(6*s.diameterUm,1.4*s.thicknessUm):dimensions.plateWidthUm;
   const unit=6/width, height=s.thicknessUm*unit, radius=s.diameterUm*.5*unit;
   const p=s.process || processState(s.progress);
   const drill=s.mode==='optical'?1:s.mode==='stress'?0:clamp(p.drillFraction);
   const fill=s.mode==='process'?clamp(p.fillFraction):0;
   const depth=s.depthUm*unit*(s.mode==='process'?clamp(p.strengthening):1);
-  return {unit,height,radius,drill,fill,depth,remaining:height*(1-drill),
+  const centers=s.mode==='process'?dimensions.centersUm.map(({x,y})=>({x:x*unit,y:y*unit})):s.mode==='optical'?[{x:0,y:0}]:[];
+  const visibleVias=centers.filter(c=>!s.cutaway || c.y>=0).map(c=>({...c,half:s.cutaway && c.y===0}));
+  return {unit,height,radius,centers,visibleVias,drill,fill,depth,remaining:height*(1-drill),
     bottom:-height/2,copperHeight:height*fill};
 }
 function release(group) {
@@ -196,34 +200,37 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
   function rebuild(s) {
     release(specimen);
     refs={};
-    const {unit,radius,height}=twinLayout(s), half=3;
+    const {unit,radius,height,centers,visibleVias}=twinLayout(s), half=3;
     refs={height,radius,unit};
     const hole=s.mode!=='stress';
-    const shape=plateShape(half,radius,s.cutaway,hole);
+    const shape=plateShape(half,radius,s.cutaway,hole,centers);
     let solidGeo=extrusion(shape);
-    if(s.mode==='process') {const outer=cylinderSurfaceSubset(solidGeo,radius,false);solidGeo.dispose();solidGeo=outer;}
+    if(s.mode==='process') {const outer=cylinderSurfaceSubset(solidGeo,radius,false,centers);solidGeo.dispose();solidGeo=outer;}
     const glass=new THREE.MeshPhysicalMaterial({color:0x9bd9ee,transparent:true,opacity:.22,roughness:.19,metalness:.02,side:THREE.DoubleSide,depthWrite:false});
     const plate=new THREE.Mesh(solidGeo,glass);plate.scale.z=height;plate.position.z=-height/2;specimen.add(plate);refs.plate=plate;
     const outlineSource=s.mode==='process'?extrusion(plateShape(half,radius,s.cutaway,false)):solidGeo;
     const edge=new THREE.LineSegments(new THREE.EdgesGeometry(outlineSource,25),new THREE.LineBasicMaterial({color:0x93d8ea,transparent:true,opacity:.52}));
     if(outlineSource!==solidGeo) outlineSource.dispose();
     edge.scale.z=height;edge.position.z=-height/2;specimen.add(edge);
-    const cylinder=extrusion(diskShape(radius,s.cutaway));
-    const holeEdge=new THREE.LineSegments(new THREE.EdgesGeometry(cylinder,25),new THREE.LineBasicMaterial({color:0xa2ecf5,transparent:true,opacity:.7}));
-    specimen.add(holeEdge);refs.holeEdge=holeEdge;
-    const plugGeometry=cylinderSurfaceSubset(cylinder,radius,false);
-    const holeWall=new THREE.Mesh(cylinderSurfaceSubset(cylinder,radius,true),glass.clone());
-    specimen.add(holeWall);refs.holeWall=holeWall;
-    const plug=new THREE.Mesh(plugGeometry,glass.clone());specimen.add(plug);refs.plug=plug;
-    const copper=new THREE.Mesh(cylinder,new THREE.MeshStandardMaterial({color:0xe69b62,metalness:.72,roughness:.29}));specimen.add(copper);refs.copper=copper;
+    refs.vias=[];
+    // Each via has an independent solid plug, exposed wall and copper fill.
+    for (const {x,y,half:halfVia} of visibleVias) {
+      const via={}; refs.vias.push(via);
+      const add=(name,mesh)=>{mesh.position.set(x,y,0);specimen.add(mesh);via[name]=mesh;};
+      const cylinder=extrusion(diskShape(radius,halfVia));
+      add('holeEdge',new THREE.LineSegments(new THREE.EdgesGeometry(cylinder,25),new THREE.LineBasicMaterial({color:0xa2ecf5,transparent:true,opacity:.7})));
+      const plugGeometry=cylinderSurfaceSubset(cylinder,radius,false);
+      add('holeWall',new THREE.Mesh(cylinderSurfaceSubset(cylinder,radius,true),glass.clone()));
+      add('plug',new THREE.Mesh(plugGeometry,glass.clone()));
+      add('copper',new THREE.Mesh(cylinder,new THREE.MeshStandardMaterial({color:0xe69b62,metalness:.72,roughness:.29})));
+      for(const name of ['plugTop','plugBottom']) add(name,new THREE.Mesh(plugGeometry,new THREE.MeshBasicMaterial({color:0x35e4ed,transparent:true,opacity:.32,side:THREE.DoubleSide,depthWrite:false})));
+      const beam=new THREE.Mesh(new THREE.CylinderGeometry(radius*.36,radius*.36,1,24),new THREE.MeshBasicMaterial({color:0xa6f4ff,transparent:true,opacity:.3,depthWrite:false}));
+      beam.rotation.x=Math.PI/2;add('beam',beam);
+    }
     const layerMaterial=new THREE.MeshBasicMaterial({color:0x35e4ed,transparent:true,opacity:.32,side:THREE.DoubleSide,depthWrite:false});
     for(const name of ['top','bottom']) {const m=new THREE.Mesh(solidGeo,layerMaterial.clone());specimen.add(m);refs[name]=m;}
     const core=new THREE.Mesh(solidGeo,new THREE.MeshBasicMaterial({color:0xffa55d,transparent:true,opacity:.15,side:THREE.DoubleSide,depthWrite:false}));specimen.add(core);refs.core=core;
-    // The remaining glass in the via carries the same surface layer until removed.
-    for(const name of ['plugTop','plugBottom']) {const m=new THREE.Mesh(plugGeometry,layerMaterial.clone());specimen.add(m);refs[name]=m;}
     layerMaterial.dispose();
-    const beam=new THREE.Mesh(new THREE.CylinderGeometry(radius*.36,radius*.36,1,24),new THREE.MeshBasicMaterial({color:0xa6f4ff,transparent:true,opacity:.3,depthWrite:false}));
-    beam.rotation.x=Math.PI/2;specimen.add(beam);refs.beam=beam;
     const point=new THREE.Mesh(new THREE.SphereGeometry(.055,12,8),new THREE.MeshBasicMaterial({color:0xffce71}));specimen.add(point);refs.probe=point;
     if(s.mode==='optical') {
       const surface=new THREE.ShapeGeometry(shape,80);
@@ -246,20 +253,25 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
     try {
       const lastMode=state.mode, first=!geometryKey;
       state={...state,...next};
-      const key=[state.mode,state.thicknessUm,state.diameterUm,state.depthUm,state.cutaway].join('|');
+      const key=[state.mode,state.thicknessUm,state.diameterUm,state.gapUm,state.holeCount,state.layout,state.depthUm,state.cutaway].join('|');
       const fresh=key!==geometryKey;
       if(fresh) {rebuild(state);geometryKey=key;}
       const s=state, p=s.process || processState(s.progress), {height:h,unit,radius}=refs;
       const optical=s.mode==='optical', stress=s.mode==='stress', process=s.mode==='process';
       const {drill,fill,remaining,bottom,depth}=twinLayout(s);
-      slab(refs.holeEdge,h/2-h*drill,h*drill,process);
-      slab(refs.holeWall,h/2-h*drill,h*drill,process);
-      slab(refs.plug,bottom,remaining,process);
-      slab(refs.copper,bottom,h*fill,process);
+      for(const via of refs.vias) {
+        slab(via.holeEdge,h/2-h*drill,h*drill,process);
+        slab(via.holeWall,h/2-h*drill,h*drill,process);
+        slab(via.plug,bottom,remaining,process);
+        slab(via.copper,bottom,h*fill,process);
+        slab(via.plugTop,h/2-depth,Math.max(0,remaining-(h-depth)),process);
+        slab(via.plugBottom,bottom,Math.min(depth,remaining),process);
+        via.beam.visible=process && p.phaseId==='drilling';
+        via.beam.scale.y=1.3+h*drill;
+        via.beam.position.z=h/2+.65-h*drill/2;
+      }
       slab(refs.top,h/2-depth,depth,!optical);
       slab(refs.bottom,bottom,depth,!optical);
-      slab(refs.plugTop,h/2-depth,Math.max(0,remaining-(h-depth)),process);
-      slab(refs.plugBottom,bottom,Math.min(depth,remaining),process);
       slab(refs.core,bottom+depth,h-2*depth,stress);
       if(stress) {
         const model=globalThis.GlassModels;
@@ -269,9 +281,6 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
         refs.core.material.opacity=.45*clamp(core/300);
       } else refs.top.material.opacity=refs.bottom.material.opacity=.26;
       refs.plate.material.opacity=optical?.1:stress?.09:.22;
-      refs.beam.visible=process && p.phaseId==='drilling';
-      refs.beam.scale.y=1.3+h*drill;
-      refs.beam.position.z=h/2+.65-h*drill/2;
       refs.probe.visible=optical;
       if(optical) {
         const texture=opticalTexture(s);

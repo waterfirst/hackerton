@@ -83,3 +83,36 @@ test('invalid and overflowing inputs fail safely', () => {
   assert.throws(() => opticalSample({}, optics), TypeError);
   assert.throws(() => opticalSample({...models, crossedTransmission: () => NaN}, optics), RangeError);
 });
+
+test('two-hole pitch, ligament and summed cylindrical volume follow physical controls',()=>{
+  for(const diameterUm of [20,100,500]) for(const gapUm of [1,120,1000]) {
+    const g=sceneGeometry({...geometry,diameterUm,gapUm});
+    assert.equal(g.holeCount,2);
+    assert.equal(g.pitchUm,diameterUm+gapUm);
+    assert.deepEqual(g.centersUm,[{x:-g.pitchUm/2,y:0},{x:g.pitchUm/2,y:0}]);
+    close(g.centersUm[1].x-g.centersUm[0].x-2*g.radiusUm,gapUm);
+    assert.ok(g.centersUm[1].x+g.radiusUm<g.halfWidthUm);
+    close(g.totalHoleVolumeUm3,2*g.holeVolumeUm3);
+    for(const fraction of [0,.25,.5,1]) close(2*Math.PI*g.radiusUm**2*g.thicknessUm*fraction/g.totalHoleVolumeUm3,fraction);
+  }
+  assert.equal(sceneGeometry(geometry).gapUm,120);
+  for(const gapUm of [0,-1,NaN,Infinity,null,'120']) assert.throws(()=>sceneGeometry({...geometry,gapUm}),RangeError);
+});
+
+test('one through four holes support centered rows and four-hole grid with exact volume',()=>{
+  for(const holeCount of [1,2,3,4]) for(const layout of holeCount===4?['row','grid']:['row']) {
+    const g=sceneGeometry({...geometry,holeCount,layout});
+    assert.equal(g.holeCount,holeCount);assert.equal(g.layout,layout);assert.equal(g.centersUm.length,holeCount);
+    close(g.totalHoleVolumeUm3,holeCount*g.holeVolumeUm3);
+    close(g.centersUm.reduce((sum,c)=>sum+c.x,0),0);close(g.centersUm.reduce((sum,c)=>sum+c.y,0),0);
+    for(const c of g.centersUm) {
+      assert.ok(Math.abs(c.x)+g.radiusUm<g.halfWidthUm);
+      assert.ok(Math.abs(c.y)+g.radiusUm<g.halfWidthUm);
+    }
+    if(layout==='row') assert.deepEqual(g.centersUm,Array.from({length:holeCount},(_,i)=>({x:(i-(holeCount-1)/2)*g.pitchUm,y:0})));
+    else assert.deepEqual(g.centersUm,[{x:-110,y:-110},{x:110,y:-110},{x:-110,y:110},{x:110,y:110}]);
+  }
+  for(const holeCount of [0,5,1.5,NaN,'2',null]) assert.throws(()=>sceneGeometry({...geometry,holeCount}),RangeError);
+  for(const holeCount of [1,2,3]) assert.throws(()=>sceneGeometry({...geometry,holeCount,layout:'grid'}),RangeError);
+  assert.throws(()=>sceneGeometry({...geometry,layout:'other'}),RangeError);
+});
