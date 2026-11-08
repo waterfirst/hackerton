@@ -6,6 +6,9 @@
  * Curved nearest-neighbor rim connections are prescribed from the user's
  * reference, NOT fast-axis streamlines or predicted propagation trajectories.
  * One sampled ligament threshold activates the complete prescribed network.
+ * A broad prescribed Gaussian tensor multiplier illustrates high retardance
+ * near candidate connectors. A narrower post-onset release core attenuates it.
+ * This observation-inspired band is NOT measured reconstruction or equilibrium.
  * Scalar local stress relief is not an equilibrium elasticity solution.
  * Completed rim junctions are not free crack tips: no singular tip field is used.
  * No universal threshold, toughness, growth law or FEM result is inferred.
@@ -16,7 +19,7 @@ function finite(v, name) { if (!Number.isFinite(v)) throw new RangeError(`${name
 function positive(v, name, zero=false) { finite(v,name); if (zero ? v<0 : v<=0) throw new RangeError(`${name} must be ${zero?'nonnegative':'positive'}`); return v; }
 const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
 function parameters(input={}) {
-  const p={holeCount:2,layout:'row',laserEnergyMj:0,stressPerMj:10,thicknessExponent:2,diameterUm:120,gapUm:120,loadMPa:60,coefficient:3,thicknessUm:500,wavelengthNm:550,polarizerAngleDeg:0,thresholdNm:150,relaxationFraction:.8,relaxationTauSec:.8,...input};
+  const p={bandStrength:1.5,holeCount:2,layout:'row',laserEnergyMj:0,stressPerMj:10,thicknessExponent:2,diameterUm:120,gapUm:120,loadMPa:60,coefficient:3,thicknessUm:500,wavelengthNm:550,polarizerAngleDeg:0,thresholdNm:150,relaxationFraction:.8,relaxationTauSec:.8,...input};
   for(const k of ['diameterUm','gapUm','thicknessUm','wavelengthNm','thresholdNm','relaxationTauSec']) positive(p[k],k);
   if(!Number.isInteger(p.holeCount)||p.holeCount<1||p.holeCount>4)throw new RangeError('holeCount must be 1..4');
   if(!['row','grid'].includes(p.layout)||(p.layout==='grid'&&p.holeCount!==4))throw new RangeError('grid layout requires four holes');
@@ -24,7 +27,8 @@ function parameters(input={}) {
   positive(p.thicknessExponent,'thicknessExponent');if(p.thicknessExponent<=1)throw new RangeError('thicknessExponent must exceed one');
   positive(p.loadMPa,'loadMPa',true); finite(p.coefficient,'coefficient');finite(p.polarizerAngleDeg,'polarizerAngleDeg');
   finite(p.relaxationFraction,'relaxationFraction'); if(p.relaxationFraction<0||p.relaxationFraction>1) throw new RangeError('relaxationFraction must be in [0,1]');
-  p.relaxationRadiusUm??=.3*p.diameterUm;
+  p.relaxationRadiusUm??=.08*p.diameterUm; p.bandWidthUm??=.22*p.diameterUm;
+  positive(p.bandStrength,'bandStrength',true);positive(p.bandWidthUm,'bandWidthUm');
   positive(p.relaxationRadiusUm,'relaxationRadiusUm');
   p.maxTargetStressMPa=finite(p.loadMPa+p.stressPerMj*p.laserEnergyMj*(500/p.thicknessUm)**p.thicknessExponent,'target stress');
   return p;
@@ -74,7 +78,7 @@ export function buildCrackScenario(input={}) {
   let peak=0,peakPoint=null;
   const seeds=candidatePaths.map((path,seedIndex)=>{
     let best={...path.points[0],deltaNm:-1};
-    for(const q of path.points){const value=delta(unitTensor(g,q.x,q.y),p);if(value>best.deltaNm){best={...q,deltaNm:value};}}
+    for(const q of path.points){const value=delta(unitTensor(g,q.x,q.y),p)*(1+p.bandStrength);if(value>best.deltaNm){best={...q,deltaNm:value};}}
     if(best.deltaNm>peak||peakPoint===null){peak=best.deltaNm;peakPoint={x:best.x,y:best.y};}
     return {...best,holeIndex:path.fromHoleIndex,edgeIndex:seedIndex,seedIndex,ligamentSeed:true};
   });
@@ -88,10 +92,12 @@ export function buildCrackScenario(input={}) {
   const tips=[];
   const fallbackProbe={x:g.holes[0].x,y:g.holes[0].y+g.radiusUm,holeIndex:0};
   const probe=seeds.reduce((best,s)=>!best||s.deltaNm>best.deltaNm?s:best,null)||fallbackProbe;
+  const flankProbe=findFlankProbe(g,p,candidatePaths,probe);
+  const bandModel={assumed:true,description:'관찰 설명용 가정 띠, 실측 재현·평형해 아님',strength:p.bandStrength,widthUm:p.bandWidthUm,releaseRadiusUm:p.relaxationRadiusUm};
   const energyCoupling={assumed:true,referenceThicknessUm:500,stressPerMj:p.stressPerMj,thicknessExponent:p.thicknessExponent,description:'Prescribed stress = background + κ E (500/t)^p; not a calibrated laser thermoelastic model.'};
-  const scenario={params:p,geometry:g,...g,tips,edges,candidatePaths,hasNeighbor,status:!hasNeighbor?'no-neighbor':Number.isFinite(onsetTime)?'threshold-reached':'below-threshold',thresholdBasis:'maximum along prescribed ligament paths',activationRule:'common onset activates the prescribed neighbor network',energyCoupling,maxTargetStressMPa:p.maxTargetStressMPa,onsetTime,maxDeltaBefore:peak*loadAtHold,maxDeltaAtMaxLoad:peak,peakPoint,seeds,paths,probe,loadAtHold};
+  const scenario={params:p,bandModel,flankProbe,shoulderProbe:flankProbe,geometry:g,...g,tips,edges,candidatePaths,hasNeighbor,status:!hasNeighbor?'no-neighbor':Number.isFinite(onsetTime)?'threshold-reached':'below-threshold',thresholdBasis:'maximum along prescribed ligament paths',activationRule:'common onset activates the prescribed neighbor network',energyCoupling,maxTargetStressMPa:p.maxTargetStressMPa,onsetTime,maxDeltaBefore:peak*loadAtHold,maxDeltaAtMaxLoad:peak,peakPoint,seeds,paths,probe,loadAtHold};
   let sampledMaxStressDifferenceMPa=peak*loadAtHold/(Math.abs(p.coefficient)*p.thicknessUm*1e-3)||0;
-  function scaleSample(x,y) {for(const time of [Number.isFinite(onsetTime)?onsetTime:4,10]){const v=crackSample(scenario,x,y,time);if(!v.excluded)sampledMaxStressDifferenceMPa=Math.max(sampledMaxStressDifferenceMPa,v.principalDifferenceMPa);}}
+  function scaleSample(x,y) {for(const time of [Number.isFinite(onsetTime)?onsetTime:4,10]){const v=crackSample(scenario,x,y,time);if(!v.excluded)sampledMaxStressDifferenceMPa=Math.max(sampledMaxStressDifferenceMPa,v.referencePrincipalDifferenceMPa);}}
   for(let iy=0;iy<=20;iy++)for(let ix=0;ix<=30;ix++)scaleSample(d.xMin+d.width*ix/30,d.yMin+d.height*iy/20);
   // Rim samples ensure single-hole and optical-coefficient-zero stress scales
   // remain meaningful independently of the ligament optical threshold.
@@ -100,7 +106,7 @@ export function buildCrackScenario(input={}) {
   scenario.sampledMaxStressDifferenceMPa=sampledMaxStressDifferenceMPa;
   scenario.stressScaleMPa=Math.max(1,sampledMaxStressDifferenceMPa*1.15);
   scenario.retardanceScaleNm=Math.max(1,scenario.stressScaleMPa*Math.abs(p.coefficient)*p.thicknessUm*1e-3);
-  scenario.scaleMethod='Sampled grid, hole rims and ligament paths, padded 15%; not a rigorous global bound.';
+  scenario.scaleMethod='Same-held-load no-relaxation reference sampled on grid, hole rims and ligament paths, padded 15%; not a rigorous global bound.';
   return scenario;
 }
 function distanceToPath(x,y,points) {
@@ -113,16 +119,44 @@ function distanceToPath(x,y,points) {
   return distance;
 }
 function state(s,time) {const t=clamp(finite(time,'time'),0,10),loadFraction=Math.min(t/4,s.loadAtHold),elapsed=Math.max(0,t-s.onsetTime);return {time:t,loadFraction,loadMPa:s.maxTargetStressMPa*loadFraction,laserEnergyMj:s.params.laserEnergyMj*loadFraction,maxTargetStressMPa:s.maxTargetStressMPa,cracked:t>=s.onsetTime,relaxation:Number.isFinite(elapsed)?s.params.relaxationFraction*(-Math.expm1(-elapsed/s.params.relaxationTauSec)):0};}
-export function crackSample(s,xUm,yUm,time=0) {
+function findFlankProbe(g,p,paths,probe) {
+  if(!paths.length)return null;
+  const edgeIndex=probe.edgeIndex??0,path=paths[edgeIndex],target=.65*p.bandWidthUm;
+  const nearest=path.points.reduce((best,q,i)=>Math.hypot(q.x-probe.x,q.y-probe.y)<Math.hypot(path.points[best].x-probe.x,path.points[best].y-probe.y)?i:best,0);
+  let best=null,bestScore=Infinity;
+  // Q is a fixed geometric offset near threshold probe P, not a stress maximum.
+  // Try nearby segment normals and either side; avoid hole interiors. Selection
+  // uses distance only and does not enforce Q > P in any optical field.
+  for(const offset of [0,-1,1,-2,2,-4,4,-8,8]) {
+    const i=clamp(nearest+offset,0,path.points.length-1),q=path.points[i],a=path.points[Math.max(0,i-1)],b=path.points[Math.min(path.points.length-1,i+1)],len=Math.hypot(b.x-a.x,b.y-a.y);
+    for(const factor of [1,.75,.5,.25])for(const sign of [1,-1]) {
+      const x=q.x-sign*(b.y-a.y)/len*target*factor,y=q.y+sign*(b.x-a.x)/len*target*factor;
+      if(!unitTensor(g,x,y))continue;
+      const distance=Math.min(...paths.map(path=>distanceToPath(x,y,path.points)));
+      const score=Math.abs(distance-target)/target+Math.abs(offset)*.001;
+      if(score<bestScore){bestScore=score;best={x,y,edgeIndex,distanceToPathUm:distance,distanceToProbeUm:Math.hypot(x-probe.x,y-probe.y),selection:'geometric normal offset near P; not a field-maximum search'};}
+    }
+  }
+  return best;
+}
+export function crackSample(s,xUm,yUm,time=0,{view='current'}={}) {
+  if(!['current','reference','base'].includes(view))throw new RangeError('view must be current, reference or base');
   finite(xUm,'xUm');finite(yUm,'yUm');const st=state(s,time);
   let cache=sampleCaches.get(s);if(!cache){cache=new Map();sampleCaches.set(s,cache);}
   const key=`${xUm},${yUm}`;let entry=cache.get(key);
-  if(!entry){let weight=0;for(const path of s.paths)weight=Math.max(weight,Math.exp(-((distanceToPath(xUm,yUm,path.points)/s.params.relaxationRadiusUm)**2)));entry={tensor:unitTensor(s.geometry,xUm,yUm),weight};if(cache.size<100000)cache.set(key,entry);}
+  if(!entry){
+    let distance=Infinity;for(const path of s.candidatePaths)distance=Math.min(distance,distanceToPath(xUm,yUm,path.points));
+    const weight=Math.exp(-((distance/s.params.relaxationRadiusUm)**2));
+    const bandWeight=Math.exp(-((distance/s.params.bandWidthUm)**2));
+    entry={tensor:unitTensor(s.geometry,xUm,yUm),weight,bandWeight};if(cache.size<100000)cache.set(key,entry);
+  }
   const t=entry.tensor;
-  if(!t)return {excluded:true,deltaNm:null,retardanceNm:null,referenceRetardanceNm:null,fastAxisRad:null,slowAxisRad:null,fastAxisDefined:false,slowAxisDefined:false,transmission:null};
+  if(!t)return {excluded:true,deltaNm:null,retardanceNm:null,referenceRetardanceNm:null,baseRetardanceNm:null,referencePrincipalDifferenceMPa:null,basePrincipalDifferenceMPa:null,fastAxisRad:null,slowAxisRad:null,fastAxisDefined:false,slowAxisDefined:false,transmission:null};
   const p=s.params;
   const weight=entry.weight;
-  const relaxation=st.relaxation*weight,scale=st.loadMPa*(1-relaxation);
+  const localRelaxation=st.relaxation*weight,relaxation=view==='current'?localRelaxation:0;
+  const bandFactor=1+p.bandStrength*entry.bandWeight;
+  const scale=st.loadMPa*(view==='base'?1:bandFactor)*(1-relaxation);
   const xx=t.xx*scale,yy=t.yy*scale,xy=t.xy*scale;
   const difference=Math.hypot(xx-yy,2*xy),angle=.5*Math.atan2(2*xy,xx-yy);
   const sigma1MPa=(xx+yy+difference)/2,sigma2MPa=(xx+yy-difference)/2;
@@ -132,8 +166,13 @@ export function crackSample(s,xUm,yUm,time=0) {
   const axisDefined=difference>1e-12&&deltaNm>1e-9;
   const fastAxisRad=axisDefined?rawFastAxisRad:null;
   const slowAxisRad=axisDefined?rawFastAxisRad+Math.PI/2:null;
-  const referenceRetardanceNm=Math.abs(p.coefficient)*t.difference*st.loadMPa*p.thicknessUm*1e-3;
-  return {excluded:false,deltaNm,retardanceNm:deltaNm,phaseRad,referenceRetardanceNm,fastAxisRad,slowAxisRad,fastAxisDefined:axisDefined,slowAxisDefined:axisDefined,principalAngleRad:angle,principalDifferenceMPa:difference,sigmaXMPa:xx,sigmaYMPa:yy,tauXYMPa:xy,sigma1MPa,sigma2MPa,maxPrincipalMPa:sigma1MPa,stressMagnitudeMPa:Math.max(Math.abs(sigma1MPa),Math.abs(sigma2MPa)),relaxation,transmission:Math.sin(2*(rawFastAxisRad-p.polarizerAngleDeg*Math.PI/180))**2*Math.sin(phaseRad/2)**2};
+  const basePrincipalDifferenceMPa=t.difference*st.loadMPa;
+  const referencePrincipalDifferenceMPa=basePrincipalDifferenceMPa*bandFactor;
+  const baseRetardanceNm=Math.abs(p.coefficient)*basePrincipalDifferenceMPa*p.thicknessUm*1e-3;
+  const referenceRetardanceNm=baseRetardanceNm*bandFactor;
+  return {excluded:false,view,bandFactor,bandWeight:entry.bandWeight,localRelaxation,baseRetardanceNm,basePrincipalDifferenceMPa,referencePrincipalDifferenceMPa,deltaNm,retardanceNm:deltaNm,phaseRad,referenceRetardanceNm,fastAxisRad,slowAxisRad,fastAxisDefined:axisDefined,slowAxisDefined:axisDefined,principalAngleRad:angle,principalDifferenceMPa:difference,sigmaXMPa:xx,sigmaYMPa:yy,tauXYMPa:xy,sigma1MPa,sigma2MPa,maxPrincipalMPa:sigma1MPa,stressMagnitudeMPa:Math.max(Math.abs(sigma1MPa),Math.abs(sigma2MPa)),relaxation,transmission:Math.sin(2*(rawFastAxisRad-p.polarizerAngleDeg*Math.PI/180))**2*Math.sin(phaseRad/2)**2};
 }
+/** Same held load and topology as current sample; does not recompute onset. */
+export function crackReferenceSample(s,xUm,yUm,time=0) {return crackSample(s,xUm,yUm,time,{view:'reference'});}
 export function crackFrame(s,time) {const st=state(s,time);
-  return {...st,hasNeighbor:s.hasNeighbor,status:!s.hasNeighbor?'no-neighbor':st.cracked?'connected':'loading',nearTipMaxStressMPa:null,tips:[],growthFactor:st.cracked?1:0,probe:crackSample(s,s.probe.x,s.probe.y,st.time),paths:st.cracked?s.paths:[],onsetTime:s.onsetTime};}
+  return {...st,hasNeighbor:s.hasNeighbor,status:!s.hasNeighbor?'no-neighbor':st.cracked?'connected':'loading',nearTipMaxStressMPa:null,tips:[],growthFactor:st.cracked?1:0,probe:crackSample(s,s.probe.x,s.probe.y,st.time),flankProbe:s.flankProbe?crackSample(s,s.flankProbe.x,s.flankProbe.y,st.time):null,shoulderProbe:s.flankProbe?crackSample(s,s.flankProbe.x,s.flankProbe.y,st.time):null,paths:st.cracked?s.paths:[],onsetTime:s.onsetTime};}

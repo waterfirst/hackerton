@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildCrackScenario,crackSample,crackFrame,crackGeometry} from './crack-model.js';
+import {buildCrackScenario,crackSample,crackFrame,crackGeometry,crackReferenceSample} from './crack-model.js';
 const close=(a,b,tol=1e-8)=>assert.ok(Math.abs(a-b)<tol,`${a} != ${b}`);
 const layouts=[[1,'row'],[2,'row'],[3,'row'],[4,'row'],[4,'grid']];
 function segmentDistance(a,b,h){const dx=b.x-a.x,dy=b.y-a.y,l=dx*dx+dy*dy,t=l?Math.max(0,Math.min(1,((h.x-a.x)*dx+(h.y-a.y)*dy)/l)):0;return Math.hypot(a.x+t*dx-h.x,a.y+t*dy-h.y);}
@@ -83,5 +83,70 @@ test('completed rim junctions have no free-tip fields or misleading tip metric',
 test('grid samples, intensity and display scales are finite, including C=0',()=>{
  for(const coefficient of [3,0]){const s=buildCrackScenario({holeCount:4,layout:'grid',coefficient});assert.ok(s.stressScaleMPa>0);assert.ok(s.retardanceScaleNm>0);
   for(let x=s.domain.xMin;x<=s.domain.xMax;x+=35)for(let y=s.domain.yMin;y<=s.domain.yMax;y+=35){const v=crackSample(s,x,y,10);if(!v.excluded){for(const value of Object.values(v))if(typeof value==='number')assert.ok(Number.isFinite(value));assert.ok(v.transmission>=0&&v.transmission<=1);}}
+ }
+});
+test('band strength zero exactly recovers same-load Kirsch-only reference',()=>{
+ const s=buildCrackScenario({bandStrength:0});close(s.onsetTime,2.8728892818434506);
+ for(const time of [0,1,10])for(const [x,y] of [[0,0],[20,30],[-99,56.20498198558558],[300,200]]){
+  const a=crackSample(s,x,y,time,{view:'reference'}),b=crackSample(s,x,y,time,{view:'base'});
+  assert.equal(a.bandFactor,1);
+  for(const key of ['retardanceNm','principalDifferenceMPa','sigmaXMPa','sigmaYMPa','tauXYMPa','sigma1MPa','sigma2MPa','transmission','phaseRad'])close(a[key],b[key]);
+ }
+});
+test('three views share held load, topology, tensor scaling and optical consistency',()=>{
+ const s=buildCrackScenario();
+ for(const time of [.25,s.onsetTime,10])for(const [x,y] of [[0,0],[15,15],[50,40],[-99,56.20498198558558],[300,200]]){
+  const current=crackSample(s,x,y,time),reference=crackReferenceSample(s,x,y,time),base=crackSample(s,x,y,time,{view:'base'});
+  assert.deepEqual(reference,crackSample(s,x,y,time,{view:'reference'}));
+  assert.ok(current.retardanceNm>=0&&current.retardanceNm<=reference.retardanceNm+1e-9);
+  close(reference.retardanceNm,base.retardanceNm*current.bandFactor);
+  close(current.retardanceNm,reference.retardanceNm*(1-current.relaxation));
+  close(current.referencePrincipalDifferenceMPa,reference.principalDifferenceMPa);close(current.basePrincipalDifferenceMPa,base.principalDifferenceMPa);
+  for(const key of ['sigmaXMPa','sigmaYMPa','tauXYMPa','sigma1MPa','sigma2MPa']){
+   close(reference[key],base[key]*current.bandFactor);close(current[key],reference[key]*(1-current.relaxation));
+  }
+  for(const v of [current,reference,base]){close(v.sigma1MPa-v.sigma2MPa,v.principalDifferenceMPa);close(v.phaseRad,2*Math.PI*v.retardanceNm/s.params.wavelengthNm);assert.ok(v.transmission>=0&&v.transmission<=1);if(v.fastAxisDefined)close(Math.cos(v.fastAxisRad-v.slowAxisRad),0);}
+  close(reference.relaxation,0);close(base.relaxation,0);
+ }
+ assert.throws(()=>crackSample(s,0,0,1,{view:'unknown'}),RangeError);
+});
+test('narrow core unloads more than shoulder Q; shoulder remains above same-load base',()=>{
+ for(const [holeCount,layout] of layouts.slice(1)){
+  const s=buildCrackScenario({holeCount,layout}),f=crackFrame(s,10),p=f.probe,q=f.shoulderProbe;
+  assert.deepEqual(s.shoulderProbe,s.flankProbe);assert.deepEqual(q,f.flankProbe);assert.equal(q.excluded,false);
+  assert.ok(p.relaxation>.79);assert.ok(q.relaxation<.1);assert.ok(p.relaxation>q.relaxation);
+  assert.ok(q.retardanceNm>q.baseRetardanceNm*1.5);assert.ok(q.retardanceNm<=q.referenceRetardanceNm);
+  assert.ok(p.retardanceNm<p.referenceRetardanceNm*.21);
+  assert.equal(s.bandModel.assumed,true);
+ }
+ // Even exceptionally narrow gaps must not put Q inside any hole.
+ for(const gapUm of [.01,1,10]){const s=buildCrackScenario({gapUm});assert.ok(s.shoulderProbe);assert.equal(crackSample(s,s.shoulderProbe.x,s.shoulderProbe.y,10).excluded,false);}
+});
+test('no neighbors means no band, and zero optical/load/release cases stay honest',()=>{
+ const single=buildCrackScenario({holeCount:1,bandStrength:100});assert.equal(single.shoulderProbe,null);assert.equal(crackFrame(single,10).shoulderProbe,null);
+ const v=crackSample(single,0,100,10);close(v.bandFactor,1);close(v.retardanceNm,v.baseRetardanceNm);
+ for(const params of [{loadMPa:0,laserEnergyMj:0},{coefficient:0}]){
+  const s=buildCrackScenario(params);assert.equal(s.onsetTime,Infinity);
+  for(const view of ['current','reference','base']){const v=crackSample(s,0,0,10,{view});close(v.retardanceNm,0);assert.equal(v.fastAxisRad,null);}
+ }
+ const s=buildCrackScenario({relaxationFraction:0}),f=crackFrame(s,10);close(f.probe.retardanceNm,f.probe.referenceRetardanceNm);close(f.shoulderProbe.retardanceNm,f.shoulderProbe.referenceRetardanceNm);
+ for(const params of [{bandStrength:-1},{bandStrength:NaN},{bandWidthUm:0},{relaxationRadiusUm:0}])assert.throws(()=>buildCrackScenario(params),RangeError);
+});
+test('fixed common scale includes sampled no-relaxation band field at held load',()=>{
+ const s=buildCrackScenario();
+ for(const path of s.candidatePaths)for(const q of path.points){const reference=crackReferenceSample(s,q.x,q.y,10);assert.ok(reference.retardanceNm<=s.retardanceScaleNm);assert.ok(reference.principalDifferenceMPa<=s.stressScaleMPa);}
+ const noBand=buildCrackScenario({bandStrength:0});close(s.onsetTime,noBand.onsetTime/(1+s.params.bandStrength));
+ assert.deepEqual(s.candidatePaths,noBand.candidatePaths);
+});
+test('Q is a deterministic near-P normal offset, showing default shoulder above relaxed core',()=>{
+ const s=buildCrackScenario(),again=buildCrackScenario(),q=s.shoulderProbe,f=crackFrame(s,10);
+ assert.deepEqual(q,again.shoulderProbe);assert.equal(q.edgeIndex,s.probe.edgeIndex);
+ close(q.distanceToProbeUm,.65*s.params.bandWidthUm);close(q.distanceToPathUm,.65*s.params.bandWidthUm);
+ assert.ok(f.shoulderProbe.retardanceNm>f.probe.retardanceNm);
+ assert.ok(f.shoulderProbe.retardanceNm/f.shoulderProbe.referenceRetardanceNm>f.probe.retardanceNm/f.probe.referenceRetardanceNm);
+ for(const params of [{bandStrength:0},{loadMPa:0,laserEnergyMj:0},{coefficient:0}]){
+  const v=buildCrackScenario(params),at=crackFrame(v,10).shoulderProbe;
+  assert.ok(v.shoulderProbe);assert.equal(at.excluded,false);assert.ok(Number.isFinite(at.retardanceNm));
+  if(params.bandStrength===0)close(at.referenceRetardanceNm,at.baseRetardanceNm);else close(at.retardanceNm,0);
  }
 });
