@@ -1,3 +1,4 @@
+import {analyzerTransmission} from './polarization.js';
 /** User-prescribed optical crack hypothesis, NOT a fracture predictor or FEM.
  * Circular Kirsch tensors are superposed and duplicated remote tensors
  * subtracted. This is NOT the exact interacting multi-hole boundary solution.
@@ -29,7 +30,7 @@ function parameters(input={}) {
   if(!['row','grid'].includes(p.layout)||(p.layout==='grid'&&p.holeCount!==4))throw new RangeError('grid layout requires four holes');
   for(const k of ['laserEnergyMj','stressPerMj'])positive(p[k],k,true);
   positive(p.thicknessExponent,'thicknessExponent');if(p.thicknessExponent<=1)throw new RangeError('thicknessExponent must exceed one');
-  positive(p.loadMPa,'loadMPa',true); finite(p.coefficient,'coefficient');finite(p.polarizerAngleDeg,'polarizerAngleDeg');
+  positive(p.loadMPa,'loadMPa',true); finite(p.coefficient,'coefficient');finite(p.polarizerAngleDeg,'polarizerAngleDeg');p.analyzerAngleDeg??=p.polarizerAngleDeg+90;finite(p.analyzerAngleDeg,'analyzerAngleDeg');
   finite(p.relaxationFraction,'relaxationFraction'); if(p.relaxationFraction<0||p.relaxationFraction>1) throw new RangeError('relaxationFraction must be in [0,1]');
   finite(p.propagationDurationSec,'propagationDurationSec');if(p.propagationDurationSec<.2||p.propagationDurationSec>5)throw new RangeError('propagationDurationSec must be in [0.2,5]');
   p.relaxationRadiusUm??=.08*p.diameterUm; p.bandWidthUm??=.22*p.diameterUm;
@@ -235,7 +236,7 @@ export function crackSample(s,xUm,yUm,time=0,{view='current'}={}) {
   const referencePrincipalDifferenceMPa=basePrincipalDifferenceMPa*bandFactor;
   const baseRetardanceNm=Math.abs(p.coefficient)*basePrincipalDifferenceMPa*p.thicknessUm*1e-3;
   const referenceRetardanceNm=baseRetardanceNm*bandFactor;
-  return {excluded:false,view,bandFactor,bandWeight:entry.bandWeight,localRelaxation,localArrivalTimeSec,localGrowthReached:localArrivalTimeSec!==null&&st.time>=localArrivalTimeSec,baseRetardanceNm,basePrincipalDifferenceMPa,referencePrincipalDifferenceMPa,deltaNm,retardanceNm:deltaNm,phaseRad,referenceRetardanceNm,fastAxisRad,slowAxisRad,fastAxisDefined:axisDefined,slowAxisDefined:axisDefined,principalAngleRad:angle,principalDifferenceMPa:difference,sigmaXMPa:xx,sigmaYMPa:yy,tauXYMPa:xy,sigma1MPa,sigma2MPa,maxPrincipalMPa:sigma1MPa,stressMagnitudeMPa:Math.max(Math.abs(sigma1MPa),Math.abs(sigma2MPa)),relaxation,transmission:crossedPolarizerTransmission(deltaNm,p.wavelengthNm,rawFastAxisRad,p.polarizerAngleDeg)};
+  return {excluded:false,view,bandFactor,bandWeight:entry.bandWeight,localRelaxation,localArrivalTimeSec,localGrowthReached:localArrivalTimeSec!==null&&st.time>=localArrivalTimeSec,baseRetardanceNm,basePrincipalDifferenceMPa,referencePrincipalDifferenceMPa,deltaNm,retardanceNm:deltaNm,phaseRad,referenceRetardanceNm,fastAxisRad,slowAxisRad,fastAxisDefined:axisDefined,slowAxisDefined:axisDefined,principalAngleRad:angle,principalDifferenceMPa:difference,sigmaXMPa:xx,sigmaYMPa:yy,tauXYMPa:xy,sigma1MPa,sigma2MPa,maxPrincipalMPa:sigma1MPa,stressMagnitudeMPa:Math.max(Math.abs(sigma1MPa),Math.abs(sigma2MPa)),relaxation,transmission:analyzerTransmission({retardanceNm:deltaNm,wavelengthNm:p.wavelengthNm,fastAxisRad:rawFastAxisRad,polarizerAngleDeg:p.polarizerAngleDeg,analyzerAngleDeg:p.analyzerAngleDeg})};
 }
 /** Same held load and topology as current sample; does not recompute onset. */
 export function crackReferenceSample(s,xUm,yUm,time=0) {return crackSample(s,xUm,yUm,time,{view:'reference'});}

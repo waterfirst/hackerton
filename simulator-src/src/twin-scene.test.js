@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import {plateShape, diskShape, extrusion, twinLayout} from './twin-scene.js';
+import {createRequire} from 'node:module';
+import {opticalImageData, SINGLE_HOLE_COLOR_EXAMPLE} from './twin-model.js';
+import {plateShape, diskShape, extrusion, twinLayout, createOpticalTexture} from './twin-scene.js';
 
 const physical={thicknessUm:500,diameterUm:100,depthUm:30};
 const close=(a,b,tol=1e-6)=>assert.ok(Math.abs(a-b)<=tol,`${a} != ${b}`);
@@ -81,7 +83,7 @@ test('Process endpoint transforms preserve aspect ratio and exact bottom-up full
   close(blind.bottom+blind.remaining,0);close(blind.fill,0);
   const through=twinLayout({...physical,progress:.62});
   close(through.remaining,0);close(through.copperHeight,0);
-  const fill=twinLayout({...physical,progress:.86});
+  const fill=twinLayout({...physical,progress:.79});
   close(fill.copperHeight,fill.height/2);close(fill.bottom+fill.copperHeight,0);
   const end=twinLayout({...physical,progress:1});
   close(end.remaining,0);close(end.copperHeight,end.height);
@@ -238,5 +240,50 @@ test('Hole count and layout do not alter legacy optical or stress geometry',()=>
     for(const holeCount of [1,2,3,4]) for(const layout of holeCount===4?['row','grid']:['row']) {
       assert.deepEqual(twinLayout({...physical,mode,holeCount,layout}),baseline);
     }
+  }
+});
+
+
+test('Three.js texture and 2D fallback use identical spectral sRGB bytes and exposure',()=>{
+  const models=createRequire(import.meta.url)('../../sim/models.js');
+  for(const spectrumMode of ['mono','white','rgb']) for(const displayWhitePoint of [.15,1]) {
+    const state={...SINGLE_HOLE_COLOR_EXAMPLE,spectrumMode,displayWhitePoint};
+    const texture=createOpticalTexture(models,state,24);
+    try {
+      assert.deepEqual(texture.image.data,opticalImageData(models,state,24));
+      assert.equal(texture.image.width,24);assert.equal(texture.image.height,24);
+      assert.equal(texture.colorSpace,THREE.SRGBColorSpace);
+      assert.equal(texture.flipY,true,'top-down canvas pixels align with bottom-up texture UVs');
+      assert.equal(texture.magFilter,THREE.LinearFilter);
+    } finally {texture.dispose();}
+  }
+});
+
+
+test('3D overburden shrinks above the glass top, via height stays fixed through CMP',()=>{
+  for(const holeCount of [1,2,3,4])for(const cutaway of [false,true]){
+    const before=twinLayout({...physical,holeCount,cutaway,progress:.88});
+    const middle=twinLayout({...physical,holeCount,cutaway,progress:.95});
+    const after=twinLayout({...physical,holeCount,cutaway,progress:1});
+    close(before.surfaceCuHeight/before.height,.045);
+    close(middle.surfaceCuHeight/before.surfaceCuHeight,.5);
+    close(after.surfaceCuHeight,0);
+    for(const state of [before,middle,after]){
+      close(state.copperHeight,state.height);
+      close(state.bottom+state.copperHeight,state.height/2);
+      close(state.remaining,0);
+    }
+  }
+  for(const mode of ['optical','stress'])close(twinLayout({...physical,mode,progress:.88}).surfaceCuHeight,0);
+});
+test('full and cutaway surface film covers glass and filled via caps without gaps',()=>{
+  for(const cutaway of [false,true])for(const layout of ['row','grid']){
+    const state=twinLayout({...physical,holeCount:4,layout,cutaway,progress:.88});
+    geometry(plateShape(3,state.radius,cutaway,true,state.centers),film=>{
+      let combined=signedVolume(film);
+      for(const via of state.visibleVias)geometry(diskShape(state.radius,via.half),cap=>{combined+=signedVolume(cap);});
+      close(combined,cutaway?18:36,2e-6);
+      close(combined*state.surfaceCuHeight,(cutaway?18:36)*state.height*.045,2e-6);
+    });
   }
 });

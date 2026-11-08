@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import {processState, sceneGeometry, opticalSample} from './twin-model.js';
+import {processState, sceneGeometry, opticalImageData, PROCESS_MODEL} from './twin-model.js';
 
 const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
 const defaults = {mode:'process', progress:0, thicknessUm:500, diameterUm:100, gapUm:120, holeCount:2, layout:'row',
   depthUm:30, compressionMPa:400, loadMPa:20, coefficient:3.5, wavelengthNm:550,
-  polarizerAngleDeg:0, cutaway:false, rotate:false, motion:true, visible:true,
+  polarizerAngleDeg:0, spectrumMode:'white', displayWhitePoint:1, cutaway:false, rotate:false, motion:true, visible:true,
   probeAngleDeg:90, probeRadiusOverA:1.5, reducedMotion:false, storyCamera:false};
 
 // One storyboard second, not a physical process-time prediction.
@@ -15,7 +15,9 @@ export const STORYBOARD_CAMERA_KEYS=Object.freeze([
   {progress:.42,azimuthDeg:-85,elevationDeg:20,targetZOverHeight:0,zoom:.85},
   {progress:.62,azimuthDeg:-90,elevationDeg:8,targetZOverHeight:-.25,zoom:.9},
   {progress:.72,azimuthDeg:-90,elevationDeg:15,targetZOverHeight:-.2,zoom:.85},
-  {progress:1,azimuthDeg:-60,elevationDeg:35,targetZOverHeight:0,zoom:1},
+  {progress:.86,azimuthDeg:-60,elevationDeg:35,targetZOverHeight:0,zoom:1},
+  {progress:.90,azimuthDeg:-60,elevationDeg:50,targetZOverHeight:.1,zoom:1},
+  {progress:1,azimuthDeg:-60,elevationDeg:50,targetZOverHeight:.1,zoom:1},
 ].map(Object.freeze));
 export function storyboardCameraPose(progress) {
   if(!Number.isFinite(progress)) throw new RangeError('Storyboard progress must be finite');
@@ -78,12 +80,25 @@ export function twinLayout(input) {
   const centers=s.mode==='process'?dimensions.centersUm.map(({x,y})=>({x:x*unit,y:y*unit})):s.mode==='optical'?[{x:0,y:0}]:[];
   const visibleVias=centers.filter(c=>!s.cutaway || c.y>=0).map(c=>({...c,half:s.cutaway && c.y===0}));
   return {unit,height,radius,centers,visibleVias,drill,fill,depth,remaining:height*(1-drill),
-    bottom:-height/2,copperHeight:height*fill};
+    bottom:-height/2,copperHeight:height*fill,
+    surfaceCuHeight:s.mode==='process'?height*PROCESS_MODEL.filmDisplayThicknessOverGlass*clamp(p.surfaceCuFraction ?? 0):0,
+    cmpFraction:s.mode==='process'?clamp(p.cmpFraction ?? 0):0};
 }
 function release(group) {
   const geometry = new Set(), materials = new Set();
   group.traverse(o => {if(o.geometry) geometry.add(o.geometry); if(o.material) (Array.isArray(o.material)?o.material:[o.material]).forEach(m=>materials.add(m));});
   geometry.forEach(g=>g.dispose()); materials.forEach(m=>m.dispose()); group.clear();
+}
+
+/** No WebGL context needed: texture bytes use the same sRGB pipeline as the fallback. */
+export function createOpticalTexture(models, state, size = 240) {
+  const texture = new THREE.DataTexture(opticalImageData(models, state, size), size, size, THREE.RGBAFormat);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = true; // opticalImageData is top-down, texture UVs are bottom-up.
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 export function createTwinScene(container, {onError = () => {}, onInteraction = () => {}} = {}) {
@@ -181,18 +196,9 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
   } catch(error) {fail(error);}
 
   function opticalTexture(s) {
-    const key=[s.loadMPa,s.coefficient,s.thicknessUm,s.wavelengthNm,s.polarizerAngleDeg].join('|');
+    const key=[s.loadMPa,s.coefficient,s.thicknessUm,s.wavelengthNm,s.polarizerAngleDeg,s.analyzerAngleDeg,s.spectrumMode,s.displayWhitePoint].join('|');
     if(textureCache.has(key)) return textureCache.get(key);
-    const n=320, data=new Uint8Array(n*n*4);
-    for(let j=0;j<n;j++) for(let i=0;i<n;i++) {
-      const sample=opticalSample(globalThis.GlassModels,{...s,xOverA:8*((i+.5)/n-.5),yOverA:8*((j+.5)/n-.5)});
-      const k=(j*n+i)*4;
-      // Pixel values represent I/I0 directly, without a false-color palette or auto-range.
-      const gray=sample.excluded ? 0 : Math.round(255*sample.transmission);
-      data[k]=data[k+1]=data[k+2]=gray;data[k+3]=sample.excluded?0:255;
-    }
-    const tex=new THREE.DataTexture(data,n,n,THREE.RGBAFormat);
-    tex.colorSpace=THREE.SRGBColorSpace;tex.magFilter=THREE.LinearFilter;tex.minFilter=THREE.LinearFilter;tex.needsUpdate=true;
+    const tex=createOpticalTexture(globalThis.GlassModels,s);
     textureCache.set(key,tex);
     if(textureCache.size>4) {const oldest=textureCache.keys().next().value;textureCache.get(oldest).dispose();textureCache.delete(oldest);}
     return tex;
@@ -223,9 +229,31 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
       add('holeWall',new THREE.Mesh(cylinderSurfaceSubset(cylinder,radius,true),glass.clone()));
       add('plug',new THREE.Mesh(plugGeometry,glass.clone()));
       add('copper',new THREE.Mesh(cylinder,new THREE.MeshStandardMaterial({color:0xe69b62,metalness:.72,roughness:.29})));
+      add('copperCap',new THREE.Mesh(cylinder,new THREE.MeshStandardMaterial({color:0xe9a36f,metalness:.65,roughness:.32})));
       for(const name of ['plugTop','plugBottom']) add(name,new THREE.Mesh(plugGeometry,new THREE.MeshBasicMaterial({color:0x35e4ed,transparent:true,opacity:.32,side:THREE.DoubleSide,depthWrite:false})));
       const beam=new THREE.Mesh(new THREE.CylinderGeometry(radius*.36,radius*.36,1,24),new THREE.MeshBasicMaterial({color:0xa6f4ff,transparent:true,opacity:.3,depthWrite:false}));
       beam.rotation.x=Math.PI/2;add('beam',beam);
+    }
+    if(s.mode==='process') {
+      // Perforated film + filled-via caps form a continuous top sheet only once vias are full.
+      refs.surfaceCu=new THREE.Mesh(extrusion(shape),new THREE.MeshStandardMaterial({color:0xe9a36f,metalness:.65,roughness:.32}));
+      specimen.add(refs.surfaceCu);
+      const pad=new THREE.Group();
+      const disk=new THREE.Mesh(new THREE.CylinderGeometry(1.3,1.3,.15,48),new THREE.MeshStandardMaterial({color:0x65c9d4,transparent:true,opacity:.5,metalness:.2,roughness:.8,depthWrite:false}));
+      disk.rotation.x=Math.PI/2;pad.add(disk);
+      const rim=new THREE.Mesh(new THREE.TorusGeometry(1.3,.025,8,64),new THREE.MeshBasicMaterial({color:0xa8ecf3}));
+      rim.position.z=-.065;pad.add(rim);
+      for(let i=0;i<4;i++) {
+        const mark=new THREE.Mesh(new THREE.BoxGeometry(.8,.035,.02),new THREE.MeshBasicMaterial({color:0x174d61}));
+        const a=i*Math.PI/2;mark.position.set(.7*Math.cos(a),.7*Math.sin(a),.08);mark.rotation.z=a;pad.add(mark);
+      }
+      refs.cmpPad=pad;specimen.add(pad);
+      const particles=new THREE.Group();
+      for(const {x,y} of visibleVias) for(let i=0;i<6;i++) {
+        const particle=new THREE.Mesh(new THREE.SphereGeometry(Math.min(radius*.08,.035),8,6),new THREE.MeshBasicMaterial({color:0xffbd82}));
+        particle.userData={x:x+(i%3-1)*radius*.55,y:y+(s.cutaway?radius*.3:0),phase:i/6};particles.add(particle);
+      }
+      refs.sputterParticles=particles;specimen.add(particles);
     }
     const layerMaterial=new THREE.MeshBasicMaterial({color:0x35e4ed,transparent:true,opacity:.32,side:THREE.DoubleSide,depthWrite:false});
     for(const name of ['top','bottom']) {const m=new THREE.Mesh(solidGeo,layerMaterial.clone());specimen.add(m);refs[name]=m;}
@@ -236,7 +264,7 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
       const surface=new THREE.ShapeGeometry(shape,80);
       const pos=surface.attributes.position, uv=surface.attributes.uv;
       for(let i=0;i<pos.count;i++) uv.setXY(i,(pos.getX(i)+half)/(half*2),(pos.getY(i)+half)/(half*2));
-      const mesh=new THREE.Mesh(surface,new THREE.MeshBasicMaterial({transparent:true,alphaTest:.01,side:THREE.DoubleSide,depthWrite:true}));
+      const mesh=new THREE.Mesh(surface,new THREE.MeshBasicMaterial({transparent:true,alphaTest:.01,side:THREE.DoubleSide,depthWrite:true,toneMapped:false}));
       mesh.position.z=height/2+.003;mesh.renderOrder=4;specimen.add(mesh);refs.map=mesh;
     }
     const grid=new THREE.GridHelper(11,22,0x28516b,0x122d42);grid.rotation.x=Math.PI/2;grid.position.z=-height/2-.35;
@@ -258,17 +286,29 @@ export function createTwinScene(container, {onError = () => {}, onInteraction = 
       if(fresh) {rebuild(state);geometryKey=key;}
       const s=state, p=s.process || processState(s.progress), {height:h,unit,radius}=refs;
       const optical=s.mode==='optical', stress=s.mode==='stress', process=s.mode==='process';
-      const {drill,fill,remaining,bottom,depth}=twinLayout(s);
+      const {drill,fill,remaining,bottom,depth,surfaceCuHeight,cmpFraction}=twinLayout(s);
       for(const via of refs.vias) {
         slab(via.holeEdge,h/2-h*drill,h*drill,process);
         slab(via.holeWall,h/2-h*drill,h*drill,process);
         slab(via.plug,bottom,remaining,process);
         slab(via.copper,bottom,h*fill,process);
+        slab(via.copperCap,h/2,surfaceCuHeight,process && fill===1);
         slab(via.plugTop,h/2-depth,Math.max(0,remaining-(h-depth)),process);
         slab(via.plugBottom,bottom,Math.min(depth,remaining),process);
         via.beam.visible=process && p.phaseId==='drilling';
         via.beam.scale.y=1.3+h*drill;
         via.beam.position.z=h/2+.65-h*drill/2;
+      }
+      if(process) {
+        slab(refs.surfaceCu,h/2,surfaceCuHeight);
+        refs.cmpPad.visible=p.phaseId==='cmp';
+        refs.cmpPad.position.set(1.45*Math.sin(cmpFraction*4*Math.PI),s.cutaway?1.35:0,h/2+surfaceCuHeight+.075);
+        refs.cmpPad.rotation.z=cmpFraction*8*Math.PI;
+        refs.sputterParticles.visible=p.phaseId==='sputter';
+        for(const particle of refs.sputterParticles.children) {
+          const {x,y,phase}=particle.userData;
+          particle.position.set(x,y,h/2+.12+(.7*(1-((p.depositionFraction*5+phase)%1))));
+        }
       }
       slab(refs.top,h/2-depth,depth,!optical);
       slab(refs.bottom,bottom,depth,!optical);

@@ -1,5 +1,5 @@
 const p=(id,label,unit,min,max,step,value,note='가정값 · 원문 보정 전')=>({id,label,unit,min,max,step,value,note});
-const optical=[p('load','원방 인장응력','MPa',0,150,1,35),p('thickness','유리 두께','µm',100,1500,10,500),p('C','응력광학 계수 C','10⁻¹² Pa⁻¹',0,8,.1,3),p('lambda','관측 파장','nm',400,750,1,550),p('angle','편광자 회전','°',0,90,1,0)];
+const optical=[p('load','원방 인장응력','MPa',0,150,1,35),p('thickness','유리 두께','µm',100,1500,10,500),p('C','응력광학 계수 C','10⁻¹² Pa⁻¹',0,8,.1,3),p('lambda','관측 파장','nm',400,750,1,550),p('angle','편광자 회전','°',0,180,1,0)];
 const ion=[p('thickness','전체 두께 t','µm',400,2000,10,1200),p('depth','압축층 깊이 d','µm',0,180,1,62),p('compression','표면 압축응력 CS','MPa',0,600,1,359),p('laser','관찰 / 가공 깊이','µm',0,1200,1,100)];
 const fracture=[p('load','인장응력 σ','MPa',0,150,1,30),p('crack','기존 결함 길이 a','µm',0,150,1,50),p('Y','형상 계수 Y','',.5,2,.01,1.12),p('KIC','파괴인성 KIC','MPa√m',.2,2,.01,.75)];
 export const sources=[

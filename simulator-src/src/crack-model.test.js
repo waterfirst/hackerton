@@ -276,3 +276,12 @@ test('exact duration snaps every row/grid connector to completed rims despite ro
   assert.deepEqual(crackFrame(s,-10),crackFrame(s,0));assert.deepEqual(crackFrame(s,20),crackFrame(s,10));assert.throws(()=>crackFrame(s,NaN),RangeError);
  }
 });
+test('independent analyzer changes light only, crossed and parallel zero-stress limits',()=>{
+ const common={laserEnergyMj:6,loadMPa:0,polarizerAngleDeg:25};
+ const cross=buildCrackScenario({...common,analyzerAngleDeg:115}),parallel=buildCrackScenario({...common,analyzerAngleDeg:25});
+ close(cross.onsetTime,parallel.onsetTime);assert.deepEqual(cross.candidatePaths,parallel.candidatePaths);
+ const x=cross.probe.x,y=cross.probe.y;
+ close(crackSample(cross,x,y,0).transmission,0);close(crackSample(parallel,x,y,0).transmission,1);
+ for(const time of [1,3,10]){const a=crackSample(cross,x,y,time),b=crackSample(parallel,x,y,time);close(a.transmission+b.transmission,1);close(a.retardanceNm,b.retardanceNm);close(a.principalDifferenceMPa,b.principalDifferenceMPa);close(crackFrame(cross,time).growthFactor,crackFrame(parallel,time).growthFactor);}
+ assert.throws(()=>buildCrackScenario({analyzerAngleDeg:NaN}),RangeError);
+});
