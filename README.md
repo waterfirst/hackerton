@@ -37,5 +37,6 @@ TGV(Through-Glass Via) 주변을 관찰한 현미경 영상의 결함 후보와 
 
 ## 참고 링크
 
-- 관련 공개 논문 확인용 DOI: https://doi.org/10.1002/sdtp.70001_564
-- 현재 초안에는 해당 논문의 본문·그림·성능 수치를 인용하지 않았습니다. 제목·서지정보·방법과 본 과제의 연결은 원문 확인 후 보완합니다.
+- 공개 SID 프로그램에서 확인된 제목: **Stress-Induced Birefringence Measurement for Crack Detection in Bessel Beam Laser-Drilled Glass**
+- DOI: https://doi.org/10.1002/sdtp.70001_564
+- 본문·초록은 확보하지 못했으며, 해당 논문의 실험 결과·그림·성능 수치를 인용하지 않았습니다.
